@@ -1,53 +1,55 @@
 # 文件名：.github/workflows/sync-fork.yml
-# 作用：每天定时检测上游 cmliu/edgetunnel 是否有新提交，
-#       仅当检测到更新时才自动 Sync fork（从而触发 Cloudflare Pages 重新部署）。
-#       没更新则直接跳过，不会无谓触发 Pages 构建。
+# 作用：每天定时检测上游 cmliu/edgetunnel 是否有「fork 尚未包含」的新提交，
+#       仅当 fork 落后于上游时才用 git merge 把上游合并进来（从而触发 Cloudflare Pages 重新部署）。
+#       关键：用 merge 而非 force reset，因此本 workflow 文件本身不会被同步抹掉。
+#
+# 放置位置：你 fork 的 JE668/edgetunnel 仓库里 .github/workflows/sync-fork.yml
 
 name: Sync Fork with Upstream
 
 on:
   schedule:
-    # 每天 UTC 00:00 触发（= 北京时间 08:00）。
-    # 想换时间改这里：https://crontab.guru/ 可帮你生成。
+    # 每天 UTC 00:00（= 北京时间 08:00）。想换时间改这里：https://crontab.guru/
     - cron: '0 0 * * *'
   workflow_dispatch: {}   # 允许在 Actions 页面手动点 “Run workflow” 立即执行一次
 
 permissions:
-  contents: write        # gh repo sync 需要写权限来更新 fork
+  contents: write        # 需要写权限来 push 合并结果
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout（提供 gh 运行上下文）
+      - name: Checkout fork（带 token，便于后续 push）
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
-      - name: 检测上游是否有更新
-        id: detect
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 配置 git 并拉取上游
         run: |
           set -euo pipefail
-          UPSTREAM="cmliu/edgetunnel"
-          UP_BRANCH=$(gh api "repos/$UPSTREAM" --jq '.default_branch')
-          FORK_BRANCH=$(gh api "repos/${{ github.repository }}" --jq '.default_branch')
-          UP_SHA=$(gh api "repos/$UPSTREAM/commits/$UP_BRANCH" --jq '.sha')
-          FORK_SHA=$(gh api "repos/${{ github.repository }}/commits/$FORK_BRANCH" --jq '.sha')
-          echo "上游  $UPSTREAM@$UP_BRANCH => $UP_SHA"
-          echo "你的fork@$FORK_BRANCH => $FORK_SHA"
-          if [ "$UP_SHA" != "$FORK_SHA" ]; then
-            echo "has_update=true"  >> "$GITHUB_OUTPUT"
-            echo "🔔 检测到上游有新提交，准备同步"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/cmliu/edgetunnel.git
+          git fetch upstream main
+
+      - name: 检测 fork 是否落后上游
+        id: detect
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "behind=false" >> "$GITHUB_OUTPUT"
+            echo "✅ fork 已包含上游全部提交，无需同步"
           else
-            echo "has_update=false" >> "$GITHUB_OUTPUT"
-            echo "✅ 已是最新，无需同步"
+            echo "behind=true"  >> "$GITHUB_OUTPUT"
+            echo "🔔 上游有 fork 尚未包含的提交，准备合并"
           fi
 
-      - name: 同步 fork（仅当有更新时执行）
-        if: steps.detect.outputs.has_update == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 合并上游（仅当落后时执行）
+        if: steps.detect.outputs.behind == 'true'
         run: |
           set -euo pipefail
-          gh repo sync "${{ github.repository }}" --source cmliu/edgetunnel --force
-          echo "✅ 已与上游同步，Cloudflare Pages 将自动重新部署"
+          git merge upstream/main --no-edit
+          git push origin main
+          echo "✅ 已合并上游更新，Cloudflare Pages 将自动重新部署"
