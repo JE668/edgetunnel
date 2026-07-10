@@ -1,0 +1,53 @@
+# 文件名：.github/workflows/sync-fork.yml
+# 作用：每天定时检测上游 cmliu/edgetunnel 是否有新提交，
+#       仅当检测到更新时才自动 Sync fork（从而触发 Cloudflare Pages 重新部署）。
+#       没更新则直接跳过，不会无谓触发 Pages 构建。
+
+name: Sync Fork with Upstream
+
+on:
+  schedule:
+    # 每天 UTC 00:00 触发（= 北京时间 08:00）。
+    # 想换时间改这里：https://crontab.guru/ 可帮你生成。
+    - cron: '0 0 * * *'
+  workflow_dispatch: {}   # 允许在 Actions 页面手动点 “Run workflow” 立即执行一次
+
+permissions:
+  contents: write        # gh repo sync 需要写权限来更新 fork
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout（提供 gh 运行上下文）
+        uses: actions/checkout@v4
+
+      - name: 检测上游是否有更新
+        id: detect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          UPSTREAM="cmliu/edgetunnel"
+          UP_BRANCH=$(gh api "repos/$UPSTREAM" --jq '.default_branch')
+          FORK_BRANCH=$(gh api "repos/${{ github.repository }}" --jq '.default_branch')
+          UP_SHA=$(gh api "repos/$UPSTREAM/commits/$UP_BRANCH" --jq '.sha')
+          FORK_SHA=$(gh api "repos/${{ github.repository }}/commits/$FORK_BRANCH" --jq '.sha')
+          echo "上游  $UPSTREAM@$UP_BRANCH => $UP_SHA"
+          echo "你的fork@$FORK_BRANCH => $FORK_SHA"
+          if [ "$UP_SHA" != "$FORK_SHA" ]; then
+            echo "has_update=true"  >> "$GITHUB_OUTPUT"
+            echo "🔔 检测到上游有新提交，准备同步"
+          else
+            echo "has_update=false" >> "$GITHUB_OUTPUT"
+            echo "✅ 已是最新，无需同步"
+          fi
+
+      - name: 同步 fork（仅当有更新时执行）
+        if: steps.detect.outputs.has_update == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh repo sync "${{ github.repository }}" --source cmliu/edgetunnel --force
+          echo "✅ 已与上游同步，Cloudflare Pages 将自动重新部署"
